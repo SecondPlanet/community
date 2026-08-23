@@ -23,8 +23,9 @@
 
 SecondPlanet 采用 Open Core 模式：
 
-- 本仓库是公开的 **Community Edition**，采用 [GNU AGPL v3](./LICENSE)；
-- **Enterprise Edition** 在独立私有仓库开发，增加组织、多租户、SSO/SCIM、高级权限、审计、AI 成本治理、高可用运维、企业白标和商业支持；
+- [`SecondPlanet/community`](https://github.com/SecondPlanet/community) 是公开的 **Community Edition**，采用 [GNU AGPL v3](./LICENSE)；
+- `SecondPlanet/enterprise` 是独立私有的 **Enterprise Edition**，增加组织、多租户、SSO/SCIM、高级权限、审计、AI 成本治理、高可用运维、企业白标和商业支持；
+- `SecondPlanet/website` 是官方站点与企业版在线 Demo 的独立私有仓库，当前暂不开发；
 - 社区版的基础安全、数据隔离和可恢复性不会被人为降级；
 - 企业版与社区版使用同一核心版本号，并通过自动兼容测试验证。
 
