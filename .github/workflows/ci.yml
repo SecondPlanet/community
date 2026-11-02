@@ -24,11 +24,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+      # pnpm/action-setup's bundled resolver chokes on the pnpm 11 workspace
+      # settings format (allowBuilds); corepack reads packageManager instead.
+      - run: corepack enable && corepack prepare pnpm@11.18.0 --activate
       - run: pnpm install --frozen-lockfile
       - name: Generate the Prisma client
         run: pnpm --filter @secondplanet/api db:generate
@@ -53,11 +55,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+      # pnpm/action-setup's bundled resolver chokes on the pnpm 11 workspace
+      # settings format (allowBuilds); corepack reads packageManager instead.
+      - run: corepack enable && corepack prepare pnpm@11.18.0 --activate
       # The license check reads the installed dependency tree.
       - run: pnpm install --frozen-lockfile
       - name: Secrets, PII and licenses
