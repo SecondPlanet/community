@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  quality:
+    name: lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Generate the Prisma client
+        run: pnpm --filter @secondplanet/api db:generate
+      - name: Build the shared types
+        # The API and the web application load the shared contracts from
+        # packages/shared-types/dist at runtime, so it is built before the tests.
+        run: pnpm --filter @secondplanet/shared-types build
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck the API
+        # The web application and the shared types are type checked by their own
+        # lint script (tsc --noEmit), the API is type checked here.
+        run: pnpm --filter @secondplanet/api exec tsc --noEmit
+      - name: Unit tests
+        run: pnpm test
+      - name: Build
+        run: pnpm build
+
+  scan:
+    name: public repository gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      # The license check reads the installed dependency tree.
+      - run: pnpm install --frozen-lockfile
+      - name: Secrets, PII and licenses
+        run: bash scripts/scan.sh
+
+  docker:
+    name: build the community images
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [quality]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate the Compose file
+        # The stack refuses to start without secrets, so the validation runs
+        # with throw-away values. Nothing here is used by a running system.
+        env:
+          MYSQL_PASSWORD: compose-validation-only
+          MYSQL_ROOT_PASSWORD: compose-validation-only
+          MINIO_ROOT_USER: compose-validation-only
+          MINIO_ROOT_PASSWORD: compose-validation-only
+          JWT_SECRET: compose-validation-only
+          DATABASE_URL: mysql://compose:compose-validation-only@mysql:3306/secondplanet
+          ADMIN_EMAIL: admin@example.com
+          ADMIN_INITIAL_PASSWORD: compose-validation-only
+          SEED_STUDENT_EMAIL: student@example.com
+          SEED_STUDENT_PASSWORD: compose-validation-only
+        run: docker compose --env-file .env.example config > /dev/null
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: api
+          push: false
+          load: true
+          tags: secondplanet-api:ci
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+      - name: Build the web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: web
+          push: false
+          load: true
+          tags: secondplanet-web:ci
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  publish:
+    name: publish the images to GHCR
+    # Only for a tagged release in the upstream repository. A fork has no
+    # package write access, so it never tries to publish.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !github.event.repository.fork
+    needs: [quality, scan, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to the GitHub container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: api
+          push: true
+          tags: |
+            ghcr.io/secondplanet/community-api:${{ github.ref_name }}
+            ghcr.io/secondplanet/community-api:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+      - name: Publish the web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: web
+          push: true
+          tags: |
+            ghcr.io/secondplanet/community-web:${{ github.ref_name }}
+            ghcr.io/secondplanet/community-web:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web

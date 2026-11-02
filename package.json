@@ -1,0 +1,34 @@
+{
+  "name": "secondplanet-community",
+  "version": "1.10.0",
+  "private": true,
+  "packageManager": "pnpm@11.18.0",
+  "description": "SecondPlanet Community - AI-native learning and knowledge exploration platform",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:web": "pnpm --filter @secondplanet/web dev",
+    "dev:api": "pnpm --filter @secondplanet/api dev",
+    "build": "pnpm -r build",
+    "build:web": "pnpm --filter @secondplanet/web build",
+    "build:api": "pnpm --filter @secondplanet/api build",
+    "start": "pnpm --filter @secondplanet/api start",
+    "lint": "pnpm -r lint",
+    "check": "pnpm lint && pnpm test && pnpm build",
+    "test": "node --test deploy/*.test.mjs && pnpm -r test",
+    "e2e": "pnpm --filter @secondplanet/web e2e",
+    "db:generate": "pnpm --filter @secondplanet/api db:generate",
+    "db:migrate": "pnpm --filter @secondplanet/api db:migrate",
+    "db:studio": "pnpm --filter @secondplanet/api db:studio",
+    "db:seed": "pnpm --filter @secondplanet/api db:seed",
+    "db:seed:demo": "pnpm --filter @secondplanet/api db:seed:demo"
+  },
+  "devDependencies": {
+    "@prisma/client": "6.2.0",
+    "@types/node": "^22.14.0",
+    "prisma": "6.2.0",
+    "typescript": "~5.8.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

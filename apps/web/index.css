@@ -1,0 +1,66 @@
+/**
+ * Apps/web 全局样式入口
+ *
+ * 顺序:
+ *   1. tokens.css — CSS variables(:root + .dark)
+ *   2. fonts — Google Fonts
+ *   3. Tailwind base/components/utilities
+ *   4. base 层 — body 默认(用 token)
+ */
+
+@import './src/styles/tokens.css';
+@import './src/styles/print.css';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: var(--neutral-50);
+    color: var(--neutral-900);
+    font-family: var(--font-sans);
+  }
+
+  .dark body {
+    background-color: var(--neutral-950);
+    color: var(--neutral-900);
+  }
+
+  /* Round8 R8-01: mobile fixed bottom tab (~4.5rem + safe-area) 遮住 scrollIntoView 目标;
+     给滚动容器加 scroll-padding,锚点/程序滚动落点避开 tab bar */
+  @media (max-width: 767.5px) {
+    html {
+      scroll-padding-bottom: calc(4.5rem + env(safe-area-inset-bottom));
+    }
+  }
+}
+
+/* Minimalist Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--neutral-200);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--neutral-400);
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

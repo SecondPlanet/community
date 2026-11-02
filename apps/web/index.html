@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content, viewport-fit=cover" />
+    <title>SecondPlanet</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="description" content="SecondPlanet 第二星球 — AI 原生的学习与知识探索平台:课程、学位、黑客松与企业培训。" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="SecondPlanet" />
+    <meta property="og:title" content="SecondPlanet 第二星球" />
+    <meta property="og:description" content="AI 原生的学习与知识探索平台:课程、学位、黑客松与企业培训。" />
+    <meta property="og:image" content="/favicon.svg" />
+    <!--
+      Security: SPA CSP (后端 helmet 只覆盖 API 响应, SPA 自身要 meta CSP).
+      与 apps/api/src/main.ts helmet CSP 保持一致 + dev HVR ws/ws 放宽.
+      关键防护:
+        - default-src 'self' (禁 inline, 禁外域)
+        - script-src 'self' + https://www.youtube.com (YouTube IFrame Player API)
+        - frame-src 'self' https://www.youtube.com (YouTube embed iframe)
+        - object-src 'none' (禁 <object>/<embed>)
+        - frame-ancestors 'none' (禁 iframe embed)
+        - base-uri 'self' (禁 <base> 劫持)
+      dev HMR 需要的 connect-src ws://localhost:* / http://localhost:* 在 dev mode
+      由 Vite 注入;prod build 不需要. 这里用静态 meta, prod 安全, dev 跑不动时
+      用 Vite plugin transformIndexHtml 放宽.
+      2026-07-23 安全加固.
+      v1.9-alpha.2 (batch-10 A-09): 放行 https://www.youtube.com 到 script-src
+        与 frame-src, 用于官方 IFrame Player API (plan §3.6).
+    -->
+    <meta http-equiv="Content-Security-Policy" content="
+      default-src 'self';
+      script-src 'self' https://www.youtube.com;
+      style-src 'self' 'unsafe-inline';
+      img-src 'self' data: https://api.dicebear.com https://picsum.photos https://fastly.picsum.photos;
+      font-src 'self' data:;
+      connect-src 'self' https://generativelanguage.googleapis.com;
+      frame-src https://www.youtube.com;
+      object-src 'none';
+      base-uri 'self';
+      form-action 'self';
+    ">
+    <link rel="stylesheet" href="/index.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>

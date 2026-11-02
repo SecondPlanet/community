@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-社区版正在从已经运行的 SecondPlanet Enterprise 产品中进行安全、可验证的代码提取。当前仓库已经冻结许可证、版本兼容和贡献规则，但尚未发布可部署的 Community Edition。请不要把此仓库当前内容用于生产部署。
+本仓库已完成从 SecondPlanet 企业版产品（闭源商业版本）到社区版的技术预览提取：课程学习闭环、AI 自建课程（BYOK）、AI 助教、测评、黑客松站内报名等公共核心功能已在仓库内。当前处于 **技术预览（Technical Preview）** 阶段，API 尚未承诺版本间稳定，请勿用于生产部署。提取范围与路线见 [docs/EXTRACTION_PLAN.md](./docs/EXTRACTION_PLAN.md)。
 
 首个社区技术预览版将包含：
 
@@ -40,8 +40,8 @@ SecondPlanet 采用 Open Core 模式：
 同一核心版本的两个发行版保持 API、数据库扩展点和共享类型兼容：
 
 ```text
-Community:  v1.8.0
-Enterprise: v1.8.0-enterprise.1
+Community:  v1.10.0
+Enterprise: v1.10.0-enterprise.1
 ```
 
 社区版是企业版的核心基线。企业功能只能通过显式扩展接口接入，不能要求社区版依赖任何闭源包。

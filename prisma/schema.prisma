@@ -1,0 +1,1759 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== 用户与权限 ====================
+model User {
+  id                    String    @id @default(uuid())
+  email                 String    @unique
+  passwordHash          String    @map("password_hash")
+  name                  String
+  role                  UserRole  @default(student)
+  avatarUrl             String?   @map("avatar_url")
+  passwordResetRequired Boolean   @default(false) @map("password_reset_required")
+  points                Int       @default(0)
+  level                 Int       @default(1)
+  // 软删：admin 禁用账号走 deletedAt, user 物理删除会触发 17 个外键 cascade (证书 / 积分 / 评价 / 进度 ...) 数据断裂
+  // Service 层 (users.service.ts) 禁调 prisma.user.delete, 只能 update({ deletedAt: now() })
+  deletedAt             DateTime? @map("deleted_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  lastLoginAt           DateTime? @map("last_login_at")
+
+  refreshTokens         RefreshToken[]
+  providerAccounts      UserProviderAccount[]
+  passwordResetTokens   PasswordResetToken[]
+  enrollments           Enrollment[]
+  orders                Order[]
+  progressRecords       ProgressRecord[]
+  teamMembers           TeamMember[]
+  hackathonRegs         HackathonRegistration[]
+  reviewedHackathonRegs HackathonRegistration[] @relation("HackathonRegistrationReviewer")
+  submissions           Submission[]
+  practiceCompletions   PracticeCompletion[]
+  userBadges            UserBadge[]
+  pointTransactions     PointTransaction[]
+  organizedHackathons   Hackathon[]             @relation("OrganizedHackathons")
+  reviews               Review[]
+  reviewHelpfulVotes    ReviewHelpful[]
+  notes                 Note[]
+  notifications         Notification[]
+  // P1-8: 证书（学位 / 课程 / 黑客松完成时签发）
+  certificates          Certificate[]
+  // P2: 新增关联 (chat / learning events / AI usage)
+  chatSessions          ChatSession[]
+  learningEvents        LearningEvent[]
+  aiProviderConfigs     UserAiProviderConfig[]
+  ownedCourses          Course[]                @relation("OwnedCourses")
+  learningProjects      LearningProject[]
+  masteryStates         LearnerConceptState[]
+  assessmentAttempts    AssessmentAttempt[]
+  aiGenerationJobs      AiGenerationJob[]
+
+  @@index([email, deletedAt])
+  @@index([role, deletedAt])
+  @@map("users")
+}
+
+// ==================== 证书（P1-8）====================
+// 三类签发:course(单课程) / degree(学位) / hackathon(黑客松获奖)
+// serial 格式: OCSG-{YEAR}-{TYPE}-{4位序号}, 全表 unique
+// revokedAt 非空表示已撤销(管理员操作), 公开 verify 接口会查
+// metadata 装 JSON(评分 / 排名 / 备注等扩展信息)
+model Certificate {
+  id           String          @id @default(uuid())
+  userId       String          @map("user_id")
+  // P2-2: 'course' | 'degree' | 'hackathon' (从 String 升级为 enum)
+  type         CertificateType
+  // 关联的 course / degree / hackathon id
+  refId        String          @map("ref_id")
+  title        String
+  description  String?         @db.Text
+  // 证书编号 (e.g. "OCSG-2026-COURSE-0001")
+  serialNumber String          @unique @map("serial_number")
+  issuedAt     DateTime        @default(now()) @map("issued_at")
+  // 课程 / 学位 / 黑客松完成时间
+  completedAt  DateTime        @map("completed_at")
+  // 证书图片 URL (mock: 静态占位)
+  imageUrl     String?         @map("image_url")
+  // 公开可验证 URL
+  verifyUrl    String?         @map("verify_url")
+  // 元数据: 评分 / 排名 / 备注
+  metadata     Json?
+  revokedAt    DateTime?       @map("revoked_at")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@index([refId, type])
+  @@index([serialNumber])
+  @@map("certificates")
+}
+
+enum CertificateType {
+  course
+  degree
+  hackathon
+}
+
+enum UserRole {
+  admin
+  student
+  instructor
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash") @db.Char(64)
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt, usedAt])
+  @@map("password_reset_tokens")
+}
+
+// ==================== Auth 抽象层 - 多 Provider 绑定 ====================
+// 一个 user 可绑定多个 provider 账号（email/password + 第三方 OAuth ...）
+// 设计目标：可插拔 + 配置驱动 + 不重复造轮子
+//
+// P2 扩展：显式字段（email / displayName / isPrimary / linkedAt / lastUsedAt / deletedAt）
+// 原本只在 profile JSON 里有,前端 BindingsPage / admin / 风控都需要显式列
+// → 加列, 旧数据由 migration 回填 (从 profile JSON 解析 + createdAt → linkedAt, updatedAt → lastUsedAt)
+model UserProviderAccount {
+  id             String @id @default(uuid())
+  userId         String @map("user_id")
+  // provider 标识,如 "email_password" / "oauth.google"
+  // 用 String 而非 enum,新增 provider 不需要改 schema + 不需要 migration
+  provider       String
+  // 该 provider 内部的 user id（email / oauth sub）
+  providerUserId String @map("provider_user_id")
+
+  // ---- P2 新增显式字段 ----
+  // 第三方 profile 拉到的 email（即使本表 user.email 不一致,也保留第三方侧的）
+  email       String?
+  // 第三方 profile 拉到的显示名
+  displayName String?   @map("display_name")
+  // 是否为该 user 的主登录方式（解绑时不允许删主身份）
+  isPrimary   Boolean   @default(false) @map("is_primary")
+  // 绑定时间（原 createdAt 的语义迁移,数据回填用）
+  linkedAt    DateTime  @default(now()) @map("linked_at")
+  // 最后使用时间（原 updatedAt 的语义迁移）
+  lastUsedAt  DateTime  @default(now()) @map("last_used_at")
+  // 软删时间（P2：解绑走软删,保留审计可追溯）
+  deletedAt   DateTime? @map("deleted_at")
+
+  // 原始 profile / claims JSON,留作 audit + 后续扩展
+  profile   Json?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+  @@index([userId, deletedAt])
+  @@map("user_provider_accounts")
+}
+
+// ==================== 课程结构 ====================
+model Course {
+  id             String           @id @default(uuid())
+  title          String
+  description    String           @db.Text
+  learningPoints String           @map("learning_points") @db.Text
+  instructor     String
+  level          CourseLevel
+  duration       String
+  thumbnail      String
+  tags           String           @db.Text
+  costType       CostType         @map("cost_type")
+  price          Decimal          @default(0) @db.Decimal(10, 2)
+  status         CourseStatus     @default(draft)
+  courseType     CourseType       @default(own) @map("course_type")
+  externalUrl    String?          @map("external_url")
+  sourceVideoUrl String?          @unique @map("source_video_url")
+  sourcePlatform String?          @map("source_platform")
+  ownerUserId    String?          @map("owner_user_id")
+  origin         CourseOrigin     @default(platform)
+  visibility     CourseVisibility @default(public)
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  chapters         Chapter[]
+  enrollments      Enrollment[]
+  orders           Order[]
+  progressRecords  ProgressRecord[]
+  degreeCourses    DegreeCourse[]
+  practiceProjects PracticeProject[]
+  reviews          Review[]
+  // 2026-07-24: 讲师/导师多对多 (替代死字段 instructorId)
+  courseLinks      CourseInstructorLink[]
+  category         CourseCategory?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  categoryId       String?                @map("category_id")
+  owner            User?                  @relation("OwnedCourses", fields: [ownerUserId], references: [id], onDelete: Restrict)
+  learningProject  LearningProject?
+  concepts         CourseConcept[]
+  chatSessions     ChatSession[]
+
+  @@index([status, createdAt])
+  @@index([costType])
+  @@index([courseType])
+  @@index([level])
+  @@index([createdAt])
+  @@index([categoryId])
+  @@index([ownerUserId, origin, createdAt])
+  @@index([visibility, status, createdAt])
+  @@map("courses")
+}
+
+enum CourseLevel {
+  Beginner
+  Intermediate
+  Advanced
+  Expert
+}
+
+enum CostType {
+  free
+  paid
+  charity
+}
+
+enum CourseStatus {
+  draft
+  published
+  archived
+}
+
+enum CourseOrigin {
+  platform
+  ai_personal
+}
+
+enum CourseVisibility {
+  public
+  private
+  unlisted
+}
+
+enum CourseType {
+  own // 自有课程
+  partner // 合作课程
+  public // 公开课程
+  third_party // 第三方课程
+}
+
+model Chapter {
+  id          String    @id @default(uuid())
+  courseId    String    @map("course_id")
+  title       String
+  description String?   @db.Text
+  orderIndex  Int       @map("order_index")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  // P2: 软删 — admin 端点删章节走软删,前端 / 用户进度仍能查到
+  deletedAt   DateTime? @map("deleted_at")
+
+  course  Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  lessons Lesson[]
+
+  @@index([courseId, deletedAt])
+  @@map("chapters")
+}
+
+model Lesson {
+  id               String    @id @default(uuid())
+  chapterId        String    @map("chapter_id")
+  title            String
+  description      String?   @db.Text
+  videoUrl         String?   @map("video_url")
+  videoDuration    Int?      @map("video_duration")
+  orderIndex       Int       @map("order_index")
+  isPreview        Boolean   @default(false) @map("is_preview")
+  estimatedMinutes Int       @default(10) @map("estimated_minutes")
+  isHidden         Boolean   @default(false) @map("is_hidden")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  // P2: 软删
+  deletedAt        DateTime? @map("deleted_at")
+
+  chapter          Chapter           @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  resources        Resource[]
+  progress         ProgressRecord[]
+  // P2 关联
+  learningEvents   LearningEvent[]
+  chatSessions     ChatSession[]
+  notes            Note[]
+  activeProjects   LearningProject[] @relation("ActiveProjectLesson")
+  content          LessonContent?
+  conceptLinks     LessonConcept[]
+  assessments      Assessment[]
+  aiGenerationJobs AiGenerationJob[]
+  variants         LessonVariant[]
+
+  @@index([chapterId, deletedAt])
+  @@map("lessons")
+}
+
+model Resource {
+  id        String       @id @default(uuid())
+  lessonId  String       @map("lesson_id")
+  title     String
+  url       String
+  type      ResourceType
+  isLocked  Boolean      @default(true) @map("is_locked")
+  createdAt DateTime     @default(now()) @map("created_at")
+  // P2: 软删
+  deletedAt DateTime?    @map("deleted_at")
+
+  lesson Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@index([lessonId, deletedAt])
+  @@map("resources")
+}
+
+enum ResourceType {
+  pdf
+  code
+  link
+  video
+  audio
+}
+
+// ==================== 讲师 / 导师 (2026-07-24) ====================
+// 设计: 独立表, 不挂 User; 管理员后台统一维护
+// 讲师/导师同一表, 课程通过多对多联表 CourseInstructorLink 挂载, 带 role + isPrimary
+// 字段命名: 中文为主源 (zh), 英文/拼音别名为可选 (nameEn / titleEn / headlineEn / bioEn)
+// 多语言: per-entity 自由文本直接放表列 (中英双语), 不走 i18n_messages (key-value 不适合 per-entity)
+// publishedAt 软发布: null = 草稿态, 前台不显示; admin 手动设置才进前台
+// 注意: id 用 cuid() 而非 uuid() (跟 Order 一致, 自增可读性更好)
+
+model Instructor {
+  id                String    @id @default(cuid())
+  // URL slug, /instructors/{slug}, 唯一, 拼音+hash 兜底, admin 可改
+  slug              String    @unique
+  // 中文主显示名 (主源)
+  name              String
+  // 英文/拼音别名 (可选)
+  nameEn            String?   @map("name_en")
+  // 头衔: "首席科学家" / "AI 工程师" / "清华教授" (自由文本, 不做 enum, 长度限制 120)
+  title             String?   @db.VarChar(120)
+  titleEn           String?   @map("title_en") @db.VarChar(120)
+  // 短标语 (一句话简介, 首页讲师卡 / 列表摘要用)
+  headline          String?   @db.VarChar(255)
+  headlineEn        String?   @map("headline_en") @db.VarChar(255)
+  // 长 bio, 富文本存 markdown
+  bio               String?   @db.Text
+  bioEn             String?   @map("bio_en") @db.Text
+  // 头像 URL
+  avatarUrl         String?   @map("avatar_url")
+  // 当前就职公司
+  company           String?   @db.VarChar(120)
+  // 从业年限 (int)
+  yearsOfExperience Int?      @map("years_of_experience")
+  // 社交链接
+  linkedinUrl       String?   @map("linkedin_url")
+  githubUrl         String?   @map("github_url")
+  twitterUrl        String?   @map("twitter_url")
+  websiteUrl        String?   @map("website_url")
+  // 联系邮箱 (admin 可见, 前台不暴露)
+  contactEmail      String?   @map("contact_email")
+  // 内部备注 (admin 抽屉)
+  notes             String?   @db.Text
+  // 排序: 拖拽改值, 前台讲师墙/讲师列表按此升序
+  orderIndex        Int       @default(0) @map("order_index")
+  // 发布态: null = 草稿 (前台不显示), 否则取发布时间
+  publishedAt       DateTime? @map("published_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  courseLinks    CourseInstructorLink[]
+  expertiseLinks InstructorExpertiseLink[]
+
+  @@index([publishedAt, orderIndex])
+  @@index([name])
+  @@map("instructors")
+}
+
+// 课程-讲师 多对多联表
+// 同一课程可有 主讲师(instructor) + 导师(mentor), 通过 role 区分
+// 助教(co_instructor) 不做, 跟 instructor 合并 (UI 上统一叫"讲师")
+// isPrimary: 该课程主讲师标记, 前台课程详情默认显示, 最多 1 个
+// Service 层强制: 同一 (courseId, role) 最多 1 个 isPrimary=true
+model CourseInstructorLink {
+  id           String               @id @default(cuid())
+  courseId     String               @map("course_id")
+  instructorId String               @map("instructor_id")
+  // role i18n label 走 enum_translations(enumType='instructor_role')
+  role         CourseInstructorRole @default(instructor)
+  isPrimary    Boolean              @default(false) @map("is_primary")
+  // 同 role 内的展示顺序
+  orderIndex   Int                  @default(0) @map("order_index")
+  createdAt    DateTime             @default(now()) @map("created_at")
+
+  course     Course     @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  instructor Instructor @relation(fields: [instructorId], references: [id], onDelete: Cascade)
+
+  @@unique([courseId, instructorId, role])
+  @@index([instructorId, role])
+  @@index([courseId, isPrimary])
+  @@map("course_instructor_links")
+}
+
+enum CourseInstructorRole {
+  instructor
+  mentor
+}
+
+// 专长 (AI / LLM / RAG / Agent / 编程教学 ...), 独立表 + 联表 (参考 course_category 模式)
+// admin 后台管理, key 是程序内英文标识, label 是显示名
+model InstructorExpertise {
+  id         String   @id @default(cuid())
+  // 程序内唯一标识 (admin 后台英文 key), 前端不展示
+  key        String   @unique
+  // 中文 label (主源)
+  label      String
+  // 英文 label (可选, 前端按 locale 切换)
+  labelEn    String?  @map("label_en")
+  // 上下架
+  isActive   Boolean  @default(true) @map("is_active")
+  // 列表排序
+  orderIndex Int      @default(0) @map("order_index")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  instructorLinks InstructorExpertiseLink[]
+
+  @@index([isActive, orderIndex])
+  @@map("instructor_expertises")
+}
+
+model InstructorExpertiseLink {
+  instructorId String @map("instructor_id")
+  expertiseId  String @map("expertise_id")
+  orderIndex   Int    @default(0) @map("order_index")
+
+  instructor Instructor          @relation(fields: [instructorId], references: [id], onDelete: Cascade)
+  expertise  InstructorExpertise @relation(fields: [expertiseId], references: [id], onDelete: Cascade)
+
+  @@id([instructorId, expertiseId])
+  @@index([expertiseId])
+  @@map("instructor_expertise_links")
+}
+
+// ==================== 学位 ====================
+model NanoDegree {
+  id             String       @id @default(uuid())
+  title          String
+  description    String       @db.Text
+  learningPoints String       @map("learning_points") @db.Text
+  price          Decimal      @db.Decimal(10, 2)
+  icon           String       @default("sparkles")
+  costType       CostType     @map("cost_type")
+  thumbnail      String?
+  status         CourseStatus @default(draft)
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  courses     DegreeCourse[]
+  enrollments Enrollment[]
+  orders      Order[]
+
+  @@map("nano_degrees")
+}
+
+model DegreeCourse {
+  degreeId   String @map("degree_id")
+  courseId   String @map("course_id")
+  orderIndex Int    @default(0) @map("order_index")
+
+  degree NanoDegree @relation(fields: [degreeId], references: [id], onDelete: Cascade)
+  course Course     @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@id([degreeId, courseId])
+  @@index([courseId])
+  @@map("degree_courses")
+}
+
+// ==================== 注册与权限 ====================
+model Enrollment {
+  id         String           @id @default(uuid())
+  userId     String           @map("user_id")
+  courseId   String?          @map("course_id")
+  degreeId   String?          @map("degree_id")
+  enrolledAt DateTime         @default(now()) @map("enrolled_at")
+  expiresAt  DateTime?        @map("expires_at")
+  source     EnrollmentSource @default(direct)
+  // 软删：admin 取消报名走 deletedAt (退课 / 批量清账号)
+  deletedAt  DateTime?        @map("deleted_at")
+
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course Course?     @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  degree NanoDegree? @relation(fields: [degreeId], references: [id], onDelete: SetNull)
+
+  // 软删后重新报名由 Service 使用 upsert 恢复同一条唯一记录。
+  @@unique([userId, courseId])
+  @@unique([userId, degreeId])
+  @@index([userId, deletedAt])
+  @@index([courseId, deletedAt])
+  @@map("enrollments")
+}
+
+enum EnrollmentSource {
+  direct
+  degree
+  hackathon
+  promotion
+  order
+}
+
+// ==================== 订单与支付 ====================
+model Order {
+  id            String         @id @default(uuid())
+  userId        String         @map("user_id")
+  type          OrderType
+  courseId      String?        @map("course_id")
+  degreeId      String?        @map("degree_id")
+  amount        Decimal        @db.Decimal(10, 2)
+  currency      String         @default("CNY")
+  status        OrderStatus    @default(pending)
+  // P2-2: 'wechat' | 'alipay' | 'stripe' (从 String 升级为 enum)
+  // 注意: dev DB 历史数据可能含 'mock_alipay' (测试用),需要先 SQL 修正
+  paymentMethod PaymentMethod? @map("payment_method")
+  transactionId String?        @map("transaction_id")
+  paidAt        DateTime?      @map("paid_at")
+  // 软删：财务痕迹 (订单/退款/对账) 永久保留, 走 deletedAt
+  deletedAt     DateTime?      @map("deleted_at")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course Course?     @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  degree NanoDegree? @relation(fields: [degreeId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status, createdAt])
+  @@index([userId, createdAt])
+  @@index([status, paidAt])
+  @@index([transactionId])
+  @@map("orders")
+}
+
+enum OrderType {
+  course
+  degree
+}
+
+enum OrderStatus {
+  pending
+  paid
+  failed
+  expired
+  refunded
+}
+
+enum PaymentMethod {
+  wechat
+  alipay
+  stripe
+}
+
+// ==================== 黑客松 ====================
+model Hackathon {
+  id                     String           @id @default(uuid())
+  title                  String
+  description            String           @db.Text
+  bannerUrl              String?          @map("banner_url")
+  status                 HackathonStatus  @default(upcoming)
+  startDate              DateTime         @map("start_date")
+  endDate                DateTime         @map("end_date")
+  registerDeadline       DateTime?        @map("register_deadline")
+  submissionDeadline     DateTime?        @map("submission_deadline")
+  maxTeamSize            Int              @default(5) @map("max_team_size")
+  minTeamSize            Int              @default(1) @map("min_team_size")
+  location               String?
+  rules                  String?          @db.Text
+  submissionRequirements String?          @map("submission_requirements") @db.Text
+  prizes                 String?          @db.Text
+  // 外部 CTA 链接(基础信息在 tab 里, 详情页只挂 1 个外链: 报名 / 了解更多)
+  registrationUrl        String?          @map("registration_url")
+  registrationLabel      String?          @map("registration_label")
+  registrationMode       RegistrationMode @default(internal) @map("registration_mode")
+  registrationFields     Json?            @map("registration_fields")
+  organizerId            String?          @map("organizer_id")
+  createdAt              DateTime         @default(now()) @map("created_at")
+  updatedAt              DateTime         @updatedAt @map("updated_at")
+
+  registrations HackathonRegistration[]
+  teams         Team[]
+  judges        Judge[]
+  submissions   Submission[]
+  announcements Announcement[]
+  // P1 修复(2026-07-24): 赞助商
+  sponsors      Sponsor[]
+  organizer     User?                   @relation("OrganizedHackathons", fields: [organizerId], references: [id], onDelete: SetNull)
+
+  @@index([status, startDate])
+  @@index([organizerId])
+  @@map("hackathons")
+}
+
+enum HackathonStatus {
+  upcoming
+  active
+  judging
+  finished
+  cancelled
+}
+
+enum RegistrationMode {
+  internal
+  external
+}
+
+enum ReviewStatus {
+  pending
+  approved
+  waitlisted
+  rejected
+}
+
+model HackathonRegistration {
+  id           String             @id @default(uuid())
+  hackathonId  String             @map("hackathon_id")
+  userId       String             @map("user_id")
+  status       RegistrationStatus @default(registered)
+  registeredAt DateTime           @default(now()) @map("registered_at")
+  checkedInAt  DateTime?          @map("checked_in_at")
+  answers      Json?
+  formSnapshot Json?              @map("form_snapshot")
+  reviewStatus ReviewStatus       @default(pending) @map("review_status")
+  reviewNote   String?            @map("review_note") @db.Text
+  reviewedAt   DateTime?          @map("reviewed_at")
+  reviewedById String?            @map("reviewed_by_id")
+  // 软删：用户取消报名走 deletedAt, 保留审计
+  deletedAt    DateTime?          @map("deleted_at")
+
+  hackathon  Hackathon @relation(fields: [hackathonId], references: [id], onDelete: Cascade)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reviewedBy User?     @relation("HackathonRegistrationReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@unique([hackathonId, userId])
+  @@index([userId, status])
+  @@index([hackathonId, status])
+  @@index([reviewStatus])
+  @@map("hackathon_registrations")
+}
+
+enum RegistrationStatus {
+  registered
+  cancelled
+  checked_in
+}
+
+enum NotificationKind {
+  announcement
+  comment
+  hackathon
+  order
+}
+
+enum ChatRole {
+  user
+  assistant
+  system
+}
+
+enum LearningEventType {
+  play
+  pause
+  seek
+  complete
+  replay
+  skip
+  note
+  personal_course_created
+  personal_course_plan_ready
+  personal_course_plan_approved
+  personal_lesson_generation_started
+  personal_lesson_generation_completed
+  personal_lesson_opened
+  personal_lesson_completed
+  personal_assessment_started
+  personal_assessment_completed
+  personal_tutor_action_clicked
+  personal_next_step_clicked
+}
+
+enum LearningProjectStatus {
+  planning
+  plan_ready
+  generating_first_lesson
+  ready
+  learning
+  completed
+  failed
+  archived
+}
+
+enum LearningSeedType {
+  question
+  book
+  document
+  course
+}
+
+enum LessonContentStatus {
+  empty
+  queued
+  generating
+  ready
+  failed
+}
+
+enum AiJobType {
+  course_plan
+  lesson_content
+  lesson_variant
+  assessment_generate
+  assessment_grade
+}
+
+enum AiJobStatus {
+  queued
+  running
+  succeeded
+  failed
+  cancelled
+}
+
+enum AiEnqueueStatus {
+  pending
+  enqueued
+  cancelled
+}
+
+enum AssessmentKind {
+  diagnostic
+  lesson_check
+  remediation
+}
+
+enum AssessmentStatus {
+  generating
+  ready
+  failed
+}
+
+enum AssessmentAttemptStatus {
+  pending
+  grading
+  completed
+  failed
+}
+
+enum MasteryStage {
+  unseen
+  learning
+  practicing
+  mastered
+  review
+}
+
+enum ChatScope {
+  general
+  course
+  lesson
+  project
+}
+
+enum PointRefType {
+  lesson
+  practice
+  badge
+  enrollment
+}
+
+enum I18nCategory {
+  common
+  auth
+  course
+  hackathon
+  degree
+  admin
+}
+
+// P1-2 (2026-07-24): scope 字段从 String 改 enum, 防止 admin 填任意值.
+// 5 张表 + 5 个 enum. LIST_FALLBACK 数据 scope 值见 apps/web/src/lib/cms.ts:589.
+
+enum AppSettingScope {
+  global
+  page
+  user
+}
+
+enum DateFormatTemplateScope {
+  global
+  locale
+  // 兼容历史 seed 数据 (admin.users.list / common.date / dashboard.lesson.duration)
+  // 之前是 String 任意值, P1-2 enum 化保留这些 key 不破坏已有 date format 渲染
+  admin_users_list
+  common_date
+  dashboard_lesson_duration
+}
+
+enum SiteSettingScope {
+  global
+  page
+  user
+}
+
+enum QuickPromptScope {
+  lesson
+  course
+  degree
+  global
+}
+
+enum HotKeywordScope {
+  courses
+  home
+  search
+  all
+}
+
+model Team {
+  id          String   @id @default(uuid())
+  hackathonId String   @map("hackathon_id")
+  name        String
+  slogan      String?
+  captainId   String   @map("captain_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  hackathon   Hackathon    @relation(fields: [hackathonId], references: [id], onDelete: Cascade)
+  members     TeamMember[]
+  submissions Submission[]
+
+  @@index([hackathonId])
+  @@index([captainId])
+  @@map("teams")
+}
+
+model TeamMember {
+  id     String   @id @default(uuid())
+  teamId String   @map("team_id")
+  userId String   @map("user_id")
+  role   TeamRole @default(member)
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@map("team_members")
+}
+
+enum TeamRole {
+  captain
+  member
+}
+
+model Judge {
+  id          String  @id @default(uuid())
+  hackathonId String  @map("hackathon_id")
+  userId      String? @map("user_id")
+  name        String
+  title       String?
+  avatarUrl   String? @map("avatar_url")
+  bio         String? @db.Text
+  // P1 修复(2026-07-24): 排序 + 角色
+  orderIndex  Int     @default(0) @map("order_index")
+  role        String  @default("judge") // judge | advisor | host
+
+  hackathon Hackathon @relation(fields: [hackathonId], references: [id], onDelete: Cascade)
+
+  @@index([hackathonId, orderIndex])
+  @@map("judges")
+}
+
+// P1 修复(2026-07-24): 赞助商
+model Sponsor {
+  id          String   @id @default(uuid())
+  hackathonId String   @map("hackathon_id")
+  name        String
+  logoUrl     String?  @map("logo_url")
+  websiteUrl  String?  @map("website_url")
+  tier        String   @default("silver") // platinum / gold / silver / bronze
+  orderIndex  Int      @default(0) @map("order_index")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  hackathon Hackathon @relation(fields: [hackathonId], references: [id], onDelete: Cascade)
+
+  @@index([hackathonId, tier, orderIndex])
+  @@map("sponsors")
+}
+
+model Submission {
+  id          String           @id @default(uuid())
+  hackathonId String           @map("hackathon_id")
+  teamId      String?          @map("team_id")
+  userId      String?          @map("user_id")
+  title       String
+  description String           @db.Text
+  demoUrl     String?          @map("demo_url")
+  repoUrl     String?          @map("repo_url")
+  videoUrl    String?          @map("video_url")
+  attachments Json?
+  status      SubmissionStatus @default(draft)
+  score       Decimal?         @db.Decimal(5, 2)
+  feedback    String?          @db.Text
+  submittedAt DateTime?        @map("submitted_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  hackathon Hackathon @relation(fields: [hackathonId], references: [id], onDelete: Cascade)
+  team      Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // 软删:作品删除走 deletedAt (评审后归档 / 选手撤回)
+  deletedAt DateTime? @map("deleted_at")
+
+  @@index([hackathonId, status])
+  @@index([userId])
+  @@index([teamId])
+  @@index([status, submittedAt])
+  @@map("submissions")
+}
+
+enum SubmissionStatus {
+  draft
+  submitted
+  under_review
+  shortlisted
+  winner
+  rejected
+}
+
+model Announcement {
+  id          String   @id @default(uuid())
+  hackathonId String   @map("hackathon_id")
+  title       String
+  content     String   @db.Text
+  isPinned    Boolean  @default(false) @map("is_pinned")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  hackathon Hackathon @relation(fields: [hackathonId], references: [id], onDelete: Cascade)
+
+  @@index([hackathonId, isPinned, createdAt])
+  @@map("announcements")
+}
+
+// ==================== 学习进度 ====================
+model ProgressRecord {
+  id           String         @id @default(uuid())
+  userId       String         @map("user_id")
+  courseId     String         @map("course_id")
+  lessonId     String         @map("lesson_id")
+  status       ProgressStatus @default(not_started)
+  completedAt  DateTime?      @map("completed_at")
+  lastPosition Int?           @map("last_position")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  lesson Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, lessonId])
+  @@index([courseId, status])
+  @@index([lessonId])
+  @@index([userId, status])
+  @@index([status, completedAt])
+  @@map("progress_records")
+}
+
+enum ProgressStatus {
+  not_started
+  in_progress
+  completed
+}
+
+// ==================== 实践项目 ====================
+model PracticeProject {
+  id            String            @id @default(uuid())
+  courseId      String            @map("course_id")
+  title         String
+  description   String            @db.Text
+  projectUrl    String            @map("project_url")
+  thumbnailUrl  String?           @map("thumbnail_url")
+  difficulty    ProjectDifficulty @default(intermediate)
+  estimatedTime Int               @default(30) @map("estimated_time") // 分钟
+  tags          String?           @db.Text // 逗号分隔
+  projectType   ProjectType       @map("project_type")
+  orderIndex    Int               @default(0) @map("order_index")
+  requirements  String?           @db.Text // 前置要求
+  objectives    String?           @db.Text // 学习目标
+  isActive      Boolean           @default(true) @map("is_active")
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+
+  course      Course               @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  completions PracticeCompletion[]
+
+  @@index([courseId, isActive, orderIndex])
+  @@map("practice_projects")
+}
+
+enum ProjectDifficulty {
+  beginner
+  intermediate
+  advanced
+  expert
+}
+
+enum ProjectType {
+  model_deployment // 模型部署
+  model_training // 模型训练
+  model_inference // 模型推理
+  api_integration // API集成
+  notebook // Jupyter Notebook
+  sandbox // 在线沙箱
+  repository // 代码仓库
+  csghub_space // CSGHub Space
+}
+
+model PracticeCompletion {
+  id            String           @id @default(uuid())
+  userId        String           @map("user_id")
+  projectId     String           @map("project_id")
+  status        CompletionStatus @default(in_progress)
+  startedAt     DateTime         @default(now()) @map("started_at")
+  completedAt   DateTime?        @map("completed_at")
+  submissionUrl String?          @map("submission_url") // 用户提交的链接（可选）
+  notes         String?          @db.Text // 学习笔记
+  // 软删：admin 清账号 / 用户撤回进度走 deletedAt
+  deletedAt     DateTime?        @map("deleted_at")
+
+  user    User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project PracticeProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, projectId])
+  @@index([userId, status])
+  @@index([projectId, status])
+  @@map("practice_completions")
+}
+
+enum CompletionStatus {
+  in_progress
+  completed
+  skipped
+}
+
+// ==================== 游戏化：成就徽章 ====================
+model Badge {
+  id            String            @id @default(uuid())
+  code          String            @unique // 程序内唯一标识，如 "first_course"
+  name          String
+  description   String            @db.Text
+  icon          String            @default("award") // lucide 图标名
+  category      String            @default("general") // 分组：learning / streak / milestone ...
+  criteriaType  BadgeCriteriaType @map("criteria_type")
+  criteriaValue Int               @default(1) @map("criteria_value") // 达成阈值
+  // P1-3 嵌套规则 DSL(JSON 树,支持 AND/OR/NOT 组合)
+  // 为 null 时 fallback 到 criteriaType + criteriaValue
+  criteriaJson  Json?             @map("criteria_json")
+  points        Int               @default(0) // 解锁奖励积分
+  isActive      Boolean           @default(true) @map("is_active")
+  orderIndex    Int               @default(0) @map("order_index")
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+
+  userBadges UserBadge[]
+
+  @@map("badges")
+}
+
+enum BadgeCriteriaType {
+  course_completed // 完成 N 门课程
+  lessons_completed // 累计完成 N 个课时
+  streak_days // 连续学习 N 天
+  first_enrollment // 首次报名（N=1）
+  practice_completed // 完成 N 个实践项目
+  points_reached // 累计积分达到 N
+  // P1 修复(2026-07-24): 完成指定 courseId 的课程 (叶子 criteriaJson.courseId, target 默认为 1)
+  course_specific
+}
+
+model UserBadge {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  badgeId    String   @map("badge_id")
+  unlockedAt DateTime @default(now()) @map("unlocked_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badge Badge @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, badgeId])
+  @@index([userId])
+  @@map("user_badges")
+}
+
+// ==================== 游戏化：积分流水 ====================
+model PointTransaction {
+  id        String        @id @default(uuid())
+  userId    String        @map("user_id")
+  amount    Int // 正数为获得，负数为扣除
+  reason    String // 人类可读原因，如 "完成课时"
+  // P2-2: 关联类型: lesson / practice / badge / enrollment (从 String 升级为 enum)
+  refType   PointRefType? @map("ref_type")
+  refId     String?       @map("ref_id") // 关联实体 ID，用于幂等去重
+  // 软删：金融痕迹永久保留, 走 deletedAt (修正错账 / 退积分)
+  deletedAt DateTime?     @map("deleted_at")
+  createdAt DateTime      @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, refType, refId]) // 同一来源不重复发放
+  @@index([userId, createdAt])
+  @@index([userId, deletedAt])
+  @@map("point_transactions")
+}
+
+// ==================== 课程评价（P1-3）=============
+// 一个 user 对一门课只允许一条评价（@@unique 强制）
+// rating: 1-5 整数；helpful: 累计被点赞数（append-only counter）
+model Review {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  courseId  String    @map("course_id")
+  rating    Int // 1-5
+  content   String    @db.Text
+  helpful   Int       @default(0)
+  // 软删：admin 下架违规评价走 deletedAt (保留作者 / 评分痕迹, 详情页过滤)
+  deletedAt DateTime? @map("deleted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course       Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  helpfulVotes ReviewHelpful[]
+
+  @@unique([userId, courseId])
+  @@index([courseId, createdAt])
+  @@index([courseId, helpful])
+  @@index([courseId, deletedAt])
+  @@map("reviews")
+}
+
+model ReviewHelpful {
+  reviewId  String   @map("review_id")
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  review Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([reviewId, userId])
+  @@index([userId, createdAt])
+  @@map("review_helpful_votes")
+}
+
+model Note {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  lessonId    String   @map("lesson_id")
+  content     String   @db.Text
+  positionSec Int?     @map("position_sec")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lesson Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@index([userId, lessonId, positionSec])
+  @@map("notes")
+}
+
+// ==================== 通知中心（P1-7）====================
+// 站内通知：评论 / 报名 / 黑客松 / 系统 等
+// 4 类:type = 'announcement' | 'comment' | 'hackathon' | 'order'
+//   - announcement: 系统公告 / 课程更新
+//   - comment:      评论 @ 提及 / 讲师回复
+//   - hackathon:    黑客松截止提醒 / 评审结果
+//   - order:        订单支付成功 / 退款
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String           @map("user_id")
+  // P2-2: 4 类之一 (从 String 升级为 enum)
+  type      NotificationKind
+  title     String
+  body      String           @db.Text
+  linkUrl   String?          @map("link_url")
+  isRead    Boolean          @default(false) @map("is_read")
+  readAt    DateTime?        @map("read_at")
+  deletedAt DateTime?        @map("deleted_at") // 软删
+  createdAt DateTime         @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt])
+  @@index([userId, deletedAt, createdAt])
+  @@map("notifications")
+}
+
+enum NotificationType {
+  announcement
+  comment
+  hackathon
+  order
+}
+
+// ==================== AI 自建课程 ====================
+
+model LearningProject {
+  id                String                @id @default(uuid())
+  userId            String                @map("user_id")
+  courseId          String                @unique @map("course_id")
+  createRequestKey  String                @map("create_request_key")
+  seedType          LearningSeedType      @default(question) @map("seed_type")
+  seedText          String                @map("seed_text") @db.Text
+  learningGoal      String?               @map("learning_goal") @db.Text
+  targetLevel       CourseLevel?          @map("target_level")
+  availableMinutes  Int?                  @map("available_minutes")
+  preferences       Json?
+  planSnapshot      Json?                 @map("plan_snapshot")
+  status            LearningProjectStatus @default(planning)
+  currentStep       String?               @map("current_step")
+  progressPercent   Int                   @default(0) @map("progress_percent")
+  activeLessonId    String?               @map("active_lesson_id")
+  activeBlockId     String?               @map("active_block_id")
+  activeBlockOffset Int?                  @map("active_block_offset")
+  lastAccessedAt    DateTime?             @map("last_accessed_at")
+  planVersion       Int                   @default(0) @map("plan_version")
+  planApprovedAt    DateTime?             @map("plan_approved_at")
+  lastErrorCode     String?               @map("last_error_code")
+  lastErrorMessage  String?               @map("last_error_message") @db.Text
+  archivedAt        DateTime?             @map("archived_at")
+  createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @updatedAt @map("updated_at")
+
+  user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course         Course            @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  activeLesson   Lesson?           @relation("ActiveProjectLesson", fields: [activeLessonId], references: [id], onDelete: SetNull)
+  jobs           AiGenerationJob[]
+  assessments    Assessment[]
+  lessonVariants LessonVariant[]
+  chatSessions   ChatSession[]
+
+  @@unique([userId, createRequestKey])
+  @@index([userId, status, updatedAt])
+  @@index([userId, status, lastAccessedAt, id], map: "learning_projects_hub_cursor_idx")
+  @@map("learning_projects")
+}
+
+model LessonContent {
+  id             String              @id @default(uuid())
+  lessonId       String              @unique @map("lesson_id")
+  status         LessonContentStatus @default(empty)
+  schemaVersion  Int                 @default(1) @map("schema_version")
+  version        Int                 @default(1)
+  blocks         Json?
+  summary        String?             @db.Text
+  glossary       Json?
+  sourceMode     String              @default("model_knowledge") @map("source_mode")
+  generationNote String?             @map("generation_note") @db.Text
+  generatedAt    DateTime?           @map("generated_at")
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @updatedAt @map("updated_at")
+
+  lesson Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@index([status, updatedAt])
+  @@map("lesson_contents")
+}
+
+model LessonVariant {
+  id                   String   @id @default(uuid())
+  projectId            String   @map("project_id")
+  lessonId             String   @map("lesson_id")
+  lessonContentVersion Int      @map("lesson_content_version")
+  blockId              String?  @map("block_id")
+  action               String
+  content              Json?
+  jobId                String?  @unique @map("job_id")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  project LearningProject  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  lesson  Lesson           @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  job     AiGenerationJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, lessonId, lessonContentVersion, createdAt])
+  @@map("lesson_variants")
+}
+
+model CourseConcept {
+  id          String   @id @default(uuid())
+  courseId    String   @map("course_id")
+  key         String
+  title       String
+  description String?  @db.Text
+  orderIndex  Int      @default(0) @map("order_index")
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  course        Course                @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  masteryStates LearnerConceptState[]
+  lessonLinks   LessonConcept[]
+
+  @@unique([courseId, key])
+  @@index([courseId, orderIndex])
+  @@map("course_concepts")
+}
+
+model LessonConcept {
+  lessonId   String @map("lesson_id")
+  conceptId  String @map("concept_id")
+  orderIndex Int    @default(0) @map("order_index")
+
+  lesson  Lesson        @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  concept CourseConcept @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+
+  @@id([lessonId, conceptId])
+  @@index([conceptId])
+  @@map("lesson_concepts")
+}
+
+model LearnerConceptState {
+  id            String       @id @default(uuid())
+  userId        String       @map("user_id")
+  conceptId     String       @map("concept_id")
+  stage         MasteryStage @default(unseen)
+  score         Int          @default(0)
+  evidenceCount Int          @default(0) @map("evidence_count")
+  lastEvidence  Json?        @map("last_evidence")
+  nextReviewAt  DateTime?    @map("next_review_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  concept CourseConcept @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, conceptId])
+  @@index([userId, stage, updatedAt])
+  @@map("learner_concept_states")
+}
+
+model Assessment {
+  id                   String           @id @default(uuid())
+  projectId            String           @map("project_id")
+  lessonId             String           @map("lesson_id")
+  kind                 AssessmentKind
+  status               AssessmentStatus @default(generating)
+  lessonContentVersion Int              @map("lesson_content_version")
+  schemaVersion        Int              @default(1) @map("schema_version")
+  questions            Json?
+  errorCode            String?          @map("error_code")
+  createdAt            DateTime         @default(now()) @map("created_at")
+
+  project  LearningProject     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  lesson   Lesson              @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  attempts AssessmentAttempt[]
+
+  @@unique([projectId, lessonId, kind, lessonContentVersion])
+  @@index([projectId, status, createdAt])
+  @@map("assessments")
+}
+
+model AssessmentAttempt {
+  id                  String                  @id @default(uuid())
+  assessmentId        String                  @map("assessment_id")
+  userId              String                  @map("user_id")
+  status              AssessmentAttemptStatus @default(pending)
+  clientSubmissionKey String                  @map("client_submission_key")
+  answers             Json
+  grading             Json?
+  score               Int?
+  recommendation      Json?
+  submittedAt         DateTime                @default(now()) @map("submitted_at")
+  gradedAt            DateTime?               @map("graded_at")
+  errorCode           String?                 @map("error_code")
+
+  assessment  Assessment        @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gradingJobs AiGenerationJob[]
+
+  @@unique([assessmentId, userId, clientSubmissionKey])
+  @@index([userId, submittedAt])
+  @@index([assessmentId, status, submittedAt])
+  @@map("assessment_attempts")
+}
+
+model AiGenerationJob {
+  id                        String          @id @default(uuid())
+  userId                    String          @map("user_id")
+  projectId                 String          @map("project_id")
+  lessonId                  String?         @map("lesson_id")
+  attemptId                 String?         @map("attempt_id")
+  parentJobId               String?         @map("parent_job_id")
+  type                      AiJobType
+  status                    AiJobStatus     @default(queued)
+  enqueueStatus             AiEnqueueStatus @default(pending) @map("enqueue_status")
+  requestKey                String          @map("request_key")
+  executionNo               Int             @default(1) @map("execution_no")
+  inputHash                 String          @map("input_hash")
+  targetVersion             Int?            @map("target_version")
+  progress                  Int             @default(0)
+  currentStep               String?         @map("current_step")
+  queueAttempts             Int             @default(0) @map("queue_attempts")
+  manualRetries             Int             @default(0) @map("manual_retries")
+  nextEnqueueAt             DateTime?       @map("next_enqueue_at")
+  enqueueLeaseOwner         String?         @map("enqueue_lease_owner")
+  enqueueLeaseExpiresAt     DateTime?       @map("enqueue_lease_expires_at")
+  executionLeaseOwner       String?         @map("execution_lease_owner")
+  executionLeaseExpiresAt   DateTime?       @map("execution_lease_expires_at")
+  heartbeatAt               DateTime?       @map("heartbeat_at")
+  cancelRequestedAt         DateTime?       @map("cancel_requested_at")
+  providerRequestStartedAt  DateTime?       @map("provider_request_started_at")
+  providerRequestDeadlineAt DateTime?       @map("provider_request_deadline_at")
+  providerRequestFinishedAt DateTime?       @map("provider_request_finished_at")
+  errorCode                 String?         @map("error_code")
+  errorMessage              String?         @map("error_message") @db.Text
+  resultRef                 Json?           @map("result_ref")
+  startedAt                 DateTime?       @map("started_at")
+  finishedAt                DateTime?       @map("finished_at")
+  createdAt                 DateTime        @default(now()) @map("created_at")
+  updatedAt                 DateTime        @updatedAt @map("updated_at")
+
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project         LearningProject    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  lesson          Lesson?            @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+  attempt         AssessmentAttempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+  parentJob       AiGenerationJob?   @relation("JobRetries", fields: [parentJobId], references: [id], onDelete: SetNull)
+  retryExecutions AiGenerationJob[]  @relation("JobRetries")
+  variants        LessonVariant[]
+
+  @@unique([requestKey, executionNo])
+  @@index([projectId, status, createdAt])
+  @@index([enqueueStatus, nextEnqueueAt])
+  @@index([enqueueStatus, enqueueLeaseExpiresAt], map: "ai_jobs_enqueue_lease_idx")
+  @@index([status, executionLeaseExpiresAt], map: "ai_jobs_execution_lease_idx")
+  @@index([status, providerRequestDeadlineAt], map: "ai_jobs_provider_deadline_idx")
+  @@index([status, createdAt])
+  @@map("ai_generation_jobs")
+}
+
+// ==================== P2: AI 助教 / 学情事件 ====================
+// 详见 review/redesign-spec.md §6.1
+
+model ChatSession {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  lessonId  String?   @map("lesson_id")
+  courseId  String?   @map("course_id")
+  projectId String?   @map("project_id")
+  scope     ChatScope @default(general)
+  title     String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lesson   Lesson?          @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+  course   Course?          @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  project  LearningProject? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  messages ChatMessage[]
+
+  @@index([userId, lessonId])
+  @@index([userId, updatedAt])
+  @@index([projectId, updatedAt])
+  @@index([courseId, updatedAt])
+  @@map("chat_sessions")
+}
+
+model ChatMessage {
+  id        String   @id @default(uuid())
+  sessionId String   @map("session_id")
+  // P2-2: 'user' | 'assistant' | 'system' (从 String 升级为 enum)
+  role      ChatRole
+  content   String   @db.Text
+  // mock 阶段每条 100 tokens,P2 切真 AI 时改用 tokensIn / tokensOut
+  tokens    Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@map("chat_messages")
+}
+
+enum ChatMessageRole {
+  user
+  assistant
+  system
+}
+
+model LearningEvent {
+  id          String            @id @default(uuid())
+  userId      String            @map("user_id")
+  lessonId    String?           @map("lesson_id")
+  // P2-2: 'play' | 'pause' | 'seek' | 'complete' | 'replay' | 'skip' | 'note' (从 String 升级为 enum)
+  eventType   LearningEventType @map("event_type")
+  positionSec Int?              @map("position_sec")
+  durationMs  Int?              @map("duration_ms")
+  metadata    Json?
+  createdAt   DateTime          @default(now()) @map("created_at")
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lesson Lesson? @relation(fields: [lessonId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([lessonId, eventType])
+  @@map("learning_events")
+}
+
+// 用户自己的 AI 接入配置。apiKey 只在服务端加密保存，接口只返回掩码。
+model UserAiProviderConfig {
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
+  provider        String
+  apiKeyEnc       String    @map("api_key_enc") @db.Text
+  model           String
+  baseUrl         String?   @map("base_url")
+  isActive        Boolean   @default(true) @map("is_active")
+  verifiedAt      DateTime? @map("verified_at")
+  lastVerifyError String?   @map("last_verify_error") @db.Text
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+  @@index([userId, isActive])
+  @@map("user_ai_provider_configs")
+}
+
+// 注: Review model 已在 P1-3 评价系统 (line 700 附近) 完整定义, 这里不重复.
+// 之前 dev DB 的 reviews 表跟 schema 重复, 但 prisma migrate deploy 会处理 (用 P1-3 那一份).
+
+// ==================== P1-3 评价: 完整 Review model 已合并, 这里是 P2 chat/learning event 附加 ====================
+
+// ==================== CMS 基础设施 (2026-07-21) ====================
+// 把所有 UI 硬编码 (文案 / 列表 / enum label / 业务规则) 迁到后台可配置
+// 见 review/cms-design.md §1 schema 约定
+
+// §1.1 核心 3 张表
+
+// 全局 key-value 配置 (duration_buckets / number_format / ai.quick_prompts 等)
+model AppSetting {
+  key         String          @id
+  valueJson   Json            @map("value_json")
+  scope       AppSettingScope @default(global)
+  description String?         @db.Text
+  updatedAt   DateTime        @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}
+
+// 枚举 i18n (label + color + icon), 组合主键 (enumType, enumValue, locale)
+model EnumTranslation {
+  enumType   String  @map("enum_type")
+  enumValue  String  @map("enum_value")
+  locale     String  @default("zh-CN")
+  label      String
+  colorClass String? @map("color_class")
+  icon       String?
+  sortOrder  Int     @default(0) @map("sort_order")
+
+  @@id([enumType, enumValue, locale])
+  @@index([enumType, locale])
+  @@map("enum_translations")
+}
+
+// 日期/时间格式模板
+model DateFormatTemplate {
+  scope    DateFormatTemplateScope
+  locale   String                  @default("zh-CN")
+  template String
+
+  @@id([scope, locale])
+  @@map("date_format_templates")
+}
+
+// §1.2 品牌文案 2 张
+
+// 全局品牌文案 (hero / footer / auth shell / nav)
+model SiteSetting {
+  key         String           @id
+  value       Json
+  scope       SiteSettingScope @default(global)
+  description String?          @db.Text
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  @@map("site_settings")
+}
+
+// 页面级文案 (按路由)
+model PageSetting {
+  page        String
+  key         String
+  value       Json
+  description String?  @db.Text
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@id([page, key])
+  @@index([page])
+  @@map("page_settings")
+}
+
+// §1.3 结构化列表 10 张
+
+// 学员故事 / 证言
+model Testimonial {
+  id         String  @id @default(cuid())
+  name       String
+  title      String
+  quote      String  @db.Text
+  avatar     String?
+  isActive   Boolean @default(true) @map("is_active")
+  orderIndex Int     @default(0) @map("order_index")
+
+  @@index([isActive, orderIndex])
+  @@map("testimonials")
+}
+
+// AI 快捷 prompt (dashboard 助手 / lesson 内)
+model QuickPrompt {
+  id         String           @id @default(cuid())
+  emoji      String           @default("💡")
+  label      String
+  promptText String           @map("prompt_text") @db.Text
+  scope      QuickPromptScope @default(lesson)
+  isActive   Boolean          @default(true) @map("is_active")
+  orderIndex Int              @default(0) @map("order_index")
+
+  @@index([isActive, orderIndex])
+  @@index([scope, isActive, orderIndex])
+  @@map("quick_prompts")
+}
+
+// 课程分类 (LLM 应用 / RAG / Agent / ...)
+model CourseCategory {
+  id         String  @id @default(cuid())
+  key        String  @unique
+  label      String
+  isActive   Boolean @default(true) @map("is_active")
+  orderIndex Int     @default(0) @map("order_index")
+
+  // P1 修复(2026-07-24): 反向 relation
+  courses Course[]
+
+  @@index([isActive, orderIndex])
+  @@map("course_categories")
+}
+
+// 热门搜索词 (含点击数)
+model PopularSearch {
+  id         String  @id @default(cuid())
+  keyword    String  @unique
+  clickCount Int     @default(0) @map("click_count")
+  isActive   Boolean @default(true) @map("is_active")
+  orderIndex Int     @default(0) @map("order_index")
+
+  @@index([isActive, orderIndex])
+  @@map("popular_searches")
+}
+
+// 热词 (按 scope: courses / home / search)
+model HotKeyword {
+  id         String          @id @default(cuid())
+  keyword    String          @unique
+  scope      HotKeywordScope @default(courses)
+  isActive   Boolean         @default(true) @map("is_active")
+  orderIndex Int             @default(0) @map("order_index")
+
+  @@index([scope, isActive, orderIndex])
+  @@map("hot_keywords")
+}
+
+// 第三方登录 provider (Google / GitHub / 微信 / ...)
+model AuthProvider {
+  id         String  @id
+  label      String
+  icon       String
+  isActive   Boolean @default(false) @map("is_active")
+  orderIndex Int     @default(0) @map("order_index")
+  config     Json?
+
+  @@index([isActive, orderIndex])
+  @@map("auth_providers")
+}
+
+// 顶部导航项
+model TopNavItem {
+  id         String  @id @default(cuid())
+  label      String
+  path       String
+  icon       String?
+  isActive   Boolean @default(true) @map("is_active")
+  orderIndex Int     @default(0) @map("order_index")
+
+  @@index([isActive, orderIndex])
+  @@map("top_nav_items")
+}
+
+// Footer 列
+model FooterColumn {
+  id         String  @id @default(cuid())
+  title      String
+  links      Json
+  isActive   Boolean @default(true) @map("is_active")
+  orderIndex Int     @default(0) @map("order_index")
+
+  @@index([isActive, orderIndex])
+  @@map("footer_columns")
+}
+
+// §1.4 i18n 1 张
+
+// 通用文案 (key 模式, 按 locale)
+model I18nMessage {
+  key      String       @db.VarChar(255)
+  locale   String       @default("zh-CN")
+  value    String       @db.Text
+  // P2-2: 分类 (从 String 升级为 enum)
+  // 现有 seed-cms.ts 用了 'empty'/'loading'/'error'/'toast' 旧值,
+  // prisma db push 前需要先 SQL 修正为新 enum 值 (默认 'common')
+  category I18nCategory @default(common)
+
+  @@id([key, locale])
+  @@index([category])
+  @@map("i18n_messages")
+}
+
+enum I18nMessageCategory {
+  common
+  auth
+  course
+  hackathon
+  degree
+  admin
+}

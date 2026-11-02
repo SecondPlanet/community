@@ -5,8 +5,8 @@
 SecondPlanet 使用 `MAJOR.MINOR.PATCH` 作为社区核心版本。企业发行版在同一核心版本后增加企业构建序号：
 
 ```text
-Community tag:  v1.8.0
-Enterprise tag: v1.8.0-enterprise.1
+Community tag:  v1.10.0
+Enterprise tag: v1.10.0-enterprise.1
 ```
 
 企业版的 `coreVersion` 必须精确对应一个已发布的社区 tag。企业构建不能引用未发布、无法审计的社区快照。

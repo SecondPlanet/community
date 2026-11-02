@@ -1,0 +1,229 @@
+# SecondPlanet Community Edition — single node stack.
+#
+# One machine runs everything: database, object storage, API and web server.
+#
+#   cp .env.example .env      # then fill in the secrets
+#   docker compose up -d      # http://localhost:8080
+#
+# The database service must match the datasource provider declared in
+# prisma/schema.prisma (currently "mysql"). Redis backs the HTTP throttler and
+# the AI job queue. The object store is an S3-compatible server; the API talks
+# to it with the AWS SDK, so any S3-compatible implementation works.
+name: secondplanet
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-secondplanet}
+      MYSQL_USER: ${MYSQL_USER:-secondplanet}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+    command: --default-authentication-plugin=mysql_native_password
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysqladmin ping -h 127.0.0.1 -u\"$$MYSQL_USER\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Internal only: the throttler and the AI job queue. Not published to the
+  # host on purpose — reach it with `docker compose exec redis redis-cli`.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - 'if [ -n "$$REDIS_PASSWORD" ]; then exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"; else exec redis-server --appendonly yes; fi'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" ping; else redis-cli ping; fi | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # S3-compatible object storage (RustFS, Apache-2.0). The API only uses the
+  # S3 API, so a different implementation can be dropped in here.
+  minio:
+    image: rustfs/rustfs:1.0.4
+    restart: unless-stopped
+    command: /data
+    environment:
+      RUSTFS_ACCESS_KEY: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      RUSTFS_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_OBS_LOGGER_LEVEL: info
+      RUSTFS_OBS_LOG_DIRECTORY: /app/logs
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+      - minio_logs:/app/logs
+    # The storage server runs as 10001:10001, the named volumes need the same owner.
+    user: "10001:10001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  # Creates the public and the private bucket, then exits.
+  minio-init:
+    image: rustfs/rc:latest
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      MINIO_BUCKET: ${MINIO_BUCKET:-secondplanet}
+      MINIO_PRIVATE_BUCKET: ${MINIO_PRIVATE_BUCKET:-secondplanet-private}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        rc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        rc mb --ignore-existing "local/$$MINIO_BUCKET"
+        rc anonymous set download "local/$$MINIO_BUCKET"
+        rc mb --ignore-existing "local/$$MINIO_PRIVATE_BUCKET"
+
+  # Runs the database migrations and the first-boot seed, then exits.
+  migration:
+    image: ${API_IMAGE:-secondplanet-api:local}
+    build:
+      context: .
+      target: api
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    entrypoint: ["migration-entrypoint"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      BOOTSTRAP_DATA: ${BOOTSTRAP_DATA:-true}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?set ADMIN_EMAIL in .env}
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:?set ADMIN_INITIAL_PASSWORD in .env}
+      SEED_STUDENT_EMAIL: ${SEED_STUDENT_EMAIL:?set SEED_STUDENT_EMAIL in .env}
+      SEED_STUDENT_PASSWORD: ${SEED_STUDENT_PASSWORD:?set SEED_STUDENT_PASSWORD in .env}
+      AI_KEY_ENCRYPTION_KEY: ${AI_KEY_ENCRYPTION_KEY:-}
+      AI_PLATFORM_DAILY_BUDGET_USD: ${AI_PLATFORM_DAILY_BUDGET_USD:-10}
+
+  api:
+    image: ${API_IMAGE:-secondplanet-api:local}
+    build:
+      context: .
+      target: api
+    restart: unless-stopped
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: 8080
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      JWT_ACCESS_EXPIRATION: ${JWT_ACCESS_EXPIRATION:-15m}
+      JWT_REFRESH_EXPIRATION: ${JWT_REFRESH_EXPIRATION:-7d}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_USE_SSL: "false"
+      MINIO_HEALTH_ENDPOINT: minio
+      MINIO_HEALTH_PORT: 9000
+      MINIO_HEALTH_USE_SSL: "false"
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      MINIO_BUCKET: ${MINIO_BUCKET:-secondplanet}
+      MINIO_PRIVATE_BUCKET: ${MINIO_PRIVATE_BUCKET:-secondplanet-private}
+      MINIO_PUBLIC_URL_BASE: ${PUBLIC_URL:-http://localhost:8080}/${MINIO_BUCKET:-secondplanet}
+      CORS_ORIGIN: ${PUBLIC_URL:-http://localhost:8080}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+      SITE_URL: ${PUBLIC_URL:-http://localhost:8080}
+      AUTH_PROVIDERS: ${AUTH_PROVIDERS:-email_password}
+      AUTH_OAUTH_GOOGLE_CLIENT_ID: ${AUTH_OAUTH_GOOGLE_CLIENT_ID:-}
+      AUTH_OAUTH_GOOGLE_CLIENT_SECRET: ${AUTH_OAUTH_GOOGLE_CLIENT_SECRET:-}
+      AUTH_OAUTH_GOOGLE_REDIRECT_URI: ${AUTH_OAUTH_GOOGLE_REDIRECT_URI:-}
+      AUTH_OAUTH_GITHUB_CLIENT_ID: ${AUTH_OAUTH_GITHUB_CLIENT_ID:-}
+      AUTH_OAUTH_GITHUB_CLIENT_SECRET: ${AUTH_OAUTH_GITHUB_CLIENT_SECRET:-}
+      AUTH_OAUTH_GITHUB_REDIRECT_URI: ${AUTH_OAUTH_GITHUB_REDIRECT_URI:-}
+      # The AI job worker runs inside the API process on a single node.
+      AI_JOB_WORKER_ENABLED: "true"
+      AI_PERSONAL_COURSES_ENABLED: ${AI_PERSONAL_COURSES_ENABLED:-false}
+      AI_PLATFORM_DAILY_BUDGET_USD: ${AI_PLATFORM_DAILY_BUDGET_USD:-10}
+      AI_USER_DAILY_PLATFORM_TOKENS: ${AI_USER_DAILY_PLATFORM_TOKENS:-}
+      AI_USER_DAILY_BYOK_TOKENS: ${AI_USER_DAILY_BYOK_TOKENS:-}
+      AI_FEATURE_DAILY_BUDGET_RATIOS: ${AI_FEATURE_DAILY_BUDGET_RATIOS:-}
+      AI_BUDGET_WARN_RATIO: ${AI_BUDGET_WARN_RATIO:-}
+      AI_BUDGET_STOP_RATIO: ${AI_BUDGET_STOP_RATIO:-}
+      AI_PROVIDER_TIMEOUT_MS: ${AI_PROVIDER_TIMEOUT_MS:-}
+      AI_PROVIDER_USAGE_GRACE_MS: ${AI_PROVIDER_USAGE_GRACE_MS:-}
+      AI_JOB_CONCURRENCY: ${AI_JOB_CONCURRENCY:-}
+      AI_JOB_USER_CONCURRENCY: ${AI_JOB_USER_CONCURRENCY:-}
+      AI_JOB_SEMAPHORE_TTL_MS: ${AI_JOB_SEMAPHORE_TTL_MS:-}
+      AI_COURSE_PLAN_RESERVED_TOKENS: ${AI_COURSE_PLAN_RESERVED_TOKENS:-}
+      AI_COURSE_PLAN_RESERVED_COST_USD: ${AI_COURSE_PLAN_RESERVED_COST_USD:-}
+      AI_BUDGET_RESERVATION_TTL_MS: ${AI_BUDGET_RESERVATION_TTL_MS:-}
+      AI_JOB_DISPATCH_INTERVAL_MS: ${AI_JOB_DISPATCH_INTERVAL_MS:-}
+      AI_JOB_ENQUEUE_LEASE_MS: ${AI_JOB_ENQUEUE_LEASE_MS:-}
+      AI_JOB_EXECUTION_LEASE_MS: ${AI_JOB_EXECUTION_LEASE_MS:-}
+      AI_JOB_HEARTBEAT_INTERVAL_MS: ${AI_JOB_HEARTBEAT_INTERVAL_MS:-}
+      AI_JOB_RECONCILE_AGE_MS: ${AI_JOB_RECONCILE_AGE_MS:-}
+      AI_JOB_QUEUE_PREFIX: ${AI_JOB_QUEUE_PREFIX:-}
+      AI_WORKER_HEARTBEAT_INTERVAL_MS: ${AI_WORKER_HEARTBEAT_INTERVAL_MS:-}
+      AI_WORKER_HEARTBEAT_TTL_MS: ${AI_WORKER_HEARTBEAT_TTL_MS:-}
+      AI_KEY_ENCRYPTION_KEY: ${AI_KEY_ENCRYPTION_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/v1/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+
+  web:
+    image: ${WEB_IMAGE:-secondplanet-web:local}
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
+  minio_logs:

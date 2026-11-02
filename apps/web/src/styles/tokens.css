@@ -1,0 +1,186 @@
+/**
+ * Design System Tokens — P0-4 落地
+ *
+ * 严格按 review/redesign-spec.md §2.1 写,不要自己加色 / 改值。
+ * 亮色走 :root(light),暗色走 .dark(<html class="dark"> 触发)。
+ *
+ * 每个色值同时声明两个形式:
+ *   - --brand-500:        #3B82F6  (人读 + spec 字段 + 直接 var() 引用)
+ *   - --brand-500-rgb:    59 130 246  (无 #,空格分隔,供 Tailwind 消费)
+ *
+ * Tailwind 颜色走 `rgb(var(--brand-500-rgb) / <alpha-value>)` 形式,
+ * .dark class 翻转 tokens 时,Tailwind utility 自动跟随。
+ */
+
+:root {
+  /* === 品牌主色:通用深蓝 (Blue-500) === */
+  --brand-50:     #EFF6FF;
+  --brand-50-rgb: 239 246 255;
+  --brand-100:    #DBEAFE;
+  --brand-100-rgb: 219 234 254;
+  --brand-300:    #93C5FD;
+  --brand-300-rgb: 147 197 253;
+  --brand-500:    #3B82F6;
+  --brand-500-rgb: 59 130 246;
+  --brand-700:    #1D4ED8;
+  --brand-700-rgb: 29 78 216;
+  --brand-900:    #1E3A8A;
+  --brand-900-rgb: 30 58 138;
+
+  /* === 中性灰(暖偏,不用纯灰) === */
+  --neutral-0:      #FFFFFF;
+  --neutral-0-rgb:  255 255 255;
+  --neutral-50:     #FAFAF7;
+  --neutral-50-rgb: 250 250 247;
+  --neutral-100:    #F5F4F0;
+  --neutral-100-rgb: 245 244 240;
+  --neutral-200:    #E5E3DC;
+  --neutral-200-rgb: 229 227 220;
+  --neutral-400:    #A8A6A0;
+  --neutral-400-rgb: 168 166 160;
+  --neutral-600:    #6B6963;
+  --neutral-600-rgb: 107 105 99;
+  --neutral-800:    #2C2A26;
+  --neutral-800-rgb: 44 42 38;
+  --neutral-900:    #1A1916;
+  --neutral-900-rgb: 26 25 22;
+  --neutral-950:    #0D0C0A;
+  --neutral-950-rgb: 13 12 10;
+
+  /* === 语义色 === */
+  /* -700 是 CMS 枚举徽章的正文色(bg-*-100 浅底), 两种主题都保持深色, 保证对比度 */
+  --success-500:     #16A34A;
+  --success-500-rgb: 22 163 74;
+  --success-100:     #DCFCE7;
+  --success-100-rgb: 220 252 231;
+  --success-700:     #15803D;
+  --success-700-rgb: 21 128 61;
+  --warning-500:     #D97706;
+  --warning-500-rgb: 217 119 6;
+  --warning-100:     #FEF3C7;
+  --warning-100-rgb: 254 243 199;
+  --warning-700:     #B45309;
+  --warning-700-rgb: 180 83 9;
+  --danger-500:      #DC2626;
+  --danger-500-rgb:  220 38 38;
+  --danger-100:      #FEE2E2;
+  --danger-100-rgb:  254 226 226;
+  --danger-700:      #B91C1C;
+  --danger-700-rgb:  185 28 28;
+  --info-500:        #2563EB;
+  --info-500-rgb:    37 99 235;
+  --info-100:        #DBEAFE;
+  --info-100-rgb:    219 234 254;
+  --info-700:        #1D4ED8;
+  --info-700-rgb:    29 78 216;
+  /* neutral-700 跟随 neutral 阶梯翻转(bg-neutral-100 深浅相反) */
+  --neutral-700:     #3D3B36;
+  --neutral-700-rgb: 61 59 54;
+
+  /* === 学习专用色(进度 / 等级 / 积分) === */
+  --progress-500:     #3B82F6;
+  --progress-500-rgb: 59 130 246;
+  --xp-500:           #8B5CF6;
+  --xp-500-rgb:       139 92 246;
+  --xp-100:           #EDE9FE;
+  --xp-100-rgb:       237 233 254;
+  --cert-500:         #C9A227;
+  --cert-500-rgb:     201 162 39;
+  --cert-100:         #FEF3C7;
+  --cert-100-rgb:     254 243 199;
+
+  /* === 字体 stack === */
+  --font-sans:    'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  --font-display: 'Inter', 'PingFang SC', sans-serif;
+
+  /* === 间距(4px base scale) === */
+  --space-0-5: 0.125rem;
+  --space-1:   0.25rem;
+  --space-2:   0.5rem;
+  --space-3:   0.75rem;
+  --space-4:   1rem;
+  --space-5:   1.25rem;
+  --space-6:   1.5rem;
+  --space-8:   2rem;
+  --space-10:  2.5rem;
+  --space-12:  3rem;
+  --space-16:  4rem;
+  --space-20:  5rem;
+  --space-24:  6rem;
+  --space-32:  8rem;
+
+  /* === 圆角 === */
+  --radius-sm:  0.25rem;
+  --radius-md:  0.5rem;
+  --radius-lg:  0.75rem;
+  --radius-xl:  1rem;
+  --radius-2xl: 1.5rem;
+  --radius-3xl: 2rem;
+
+  /* === 阴影 === */
+  --shadow-sm:   0 1px 2px 0 rgb(0 0 0 / 0.04);
+  --shadow-md:   0 4px 8px -2px rgb(0 0 0 / 0.06), 0 2px 4px -2px rgb(0 0 0 / 0.04);
+  --shadow-lg:   0 12px 24px -6px rgb(0 0 0 / 0.08), 0 4px 8px -4px rgb(0 0 0 / 0.04);
+  --shadow-glow: 0 0 0 1px rgb(59 130 246 / 0.2), 0 8px 24px -8px rgb(59 130 246 / 0.3);
+}
+
+/* ============================================================
+ * Light 模式显式选择器 (P1-fix 2026-10-16)
+ * 与 :root 块保持一致 — 防止某些浏览器 / 缓存场景下
+ * CSS 选择器匹配出错导致 token 被错误覆盖。
+ * ============================================================ */
+.light {
+  --neutral-0-rgb:  255 255 255;
+  --neutral-50-rgb: 250 250 247;
+  --neutral-100-rgb: 245 244 240;
+  --neutral-200-rgb: 229 227 220;
+  --neutral-400-rgb: 168 166 160;
+  --neutral-600-rgb: 107 105 99;
+  --neutral-700-rgb: 61 59 54;
+  --neutral-800-rgb: 44 42 38;
+  --neutral-900-rgb: 26 25 22;
+  --neutral-950-rgb: 13 12 10;
+}
+
+
+/* ============================================================
+ * 暗色翻转 — 由 <html class="dark"> 触发
+ * 暗色 ≠ 颜色翻转:语义色提亮一档,brand-500 提亮
+ * 同时翻 RGB channel,确保 Tailwind utility 跟随
+ * ============================================================ */
+.dark {
+  --neutral-0:      #0D0C0A;
+  --neutral-0-rgb:  13 12 10;
+  --neutral-50:     #14130F;
+  --neutral-50-rgb: 20 19 15;
+  --neutral-100:    #1A1916;
+  --neutral-100-rgb: 26 25 22;
+  --neutral-200:    #2C2A26;
+  --neutral-200-rgb: 44 42 38;
+  --neutral-400:    #6B6963;
+  --neutral-400-rgb: 107 105 99;
+  --neutral-600:    #A8A6A0;
+  --neutral-600-rgb: 168 166 160;
+  --neutral-700:    #C9C7BF;
+  --neutral-700-rgb: 201 199 191;
+  --neutral-800:    #E5E3DC;
+  --neutral-800-rgb: 229 227 220;
+  --neutral-900:    #F5F4F0;
+  --neutral-900-rgb: 245 244 240;
+
+  --success-500:     #22C55E;
+  --success-500-rgb: 34 197 94;
+  --warning-500:     #F59E0B;
+  --warning-500-rgb: 245 158 11;
+  --danger-500:      #EF4444;
+  --danger-500-rgb:  239 68 68;
+  --info-500:        #3B82F6;
+  --info-500-rgb:    59 130 246;
+  --brand-500:       #60A5FA;
+  --brand-500-rgb:   96 165 250;
+  --xp-500:          #A78BFA;
+  --xp-500-rgb:      167 139 250;
+  --cert-500:        #FBBF24;
+  --cert-500-rgb:    251 191 36;
+}

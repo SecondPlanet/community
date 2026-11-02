@@ -1,0 +1,43 @@
+/**
+ * Print Styles — 证书 PDF 导出
+ *
+ * 用户在 /dashboard/certificates/:id 点「下载 PDF」会触发 window.print()
+ * 浏览器打印对话框可以选「另存为 PDF」
+ *
+ * 这里只让证书大图打印,隐藏所有 chrome:
+ *   - 顶部 nav / bottom tab / FAB → 隐藏
+ *   - 返回按钮 / 其他操作按钮 → 隐藏(用 print:hidden 类)
+ *   - 证书大图 → 撑满 A4 横向
+ */
+
+@media print {
+  /* 1) 隐藏所有非证书内容 */
+  header,
+  footer,
+  nav,
+  .mobile-bottom-tab,
+  [aria-label="搜索"],
+  [aria-label="课程导师"] {
+    display: none !important;
+  }
+
+  /* 2) body 留白清掉 */
+  body {
+    background: white !important;
+    color: black !important;
+  }
+
+  /* 3) 证书容器撑满 */
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* 4) 暗色背景强制切白(打印用白底) */
+  .dark body,
+  .dark main,
+  .dark [class*="bg-neutral-"],
+  .dark [class*="bg-gradient-to"] {
+    background: white !important;
+  }
+}

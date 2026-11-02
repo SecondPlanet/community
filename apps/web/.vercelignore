@@ -1,0 +1,15 @@
+.env
+.env.local
+.env*.local
+node_modules
+.next
+.vercel
+*.log
+.DS_Store
+prisma/*.db
+prisma/*.db-journal
+test-system.js
+*.backup
+*.bak
+
+

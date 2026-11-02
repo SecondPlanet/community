@@ -1,0 +1,25 @@
+# gitleaks configuration for the SecondPlanet Community repository.
+#
+# The default rule set is used unchanged. Only three narrow exceptions are
+# added, all of them test fixtures that look like credentials to the generic
+# "generic-api-key" rule:
+#
+#   1. a deterministic AES key in a unit test vector
+#   2. RFC 4122 identifiers used as idempotency keys in a unit test
+#   3. S3 object key prefixes
+#
+# A real credential is never one of these shapes. If a new exception is needed,
+# add it here with a comment explaining why it cannot be a credential — this
+# file is part of the public repository and is reviewed like any other change.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "test fixtures that resemble credentials"
+regexTarget = "secret"
+regexes = [
+  '''0123456789abcdef''',
+  '''[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}''',
+  '''(lessons|hackathons|degrees|courses|users)/[a-z/-]+''',
+]
