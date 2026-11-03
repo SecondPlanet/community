@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "product": "SecondPlanet",
   "edition": "community",
-  "releaseVersion": "0.0.0",
-  "releaseStatus": "governance_only",
-  "enterpriseCompatibleFrom": null
+  "releaseVersion": "1.10.0",
+  "releaseStatus": "technical_preview",
+  "enterpriseCompatibleFrom": "1.10.0"
 }
