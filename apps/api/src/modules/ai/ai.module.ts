@@ -3,6 +3,7 @@ import { AiController } from './ai.controller';
 import { AiService } from './ai.service';
 import { UserAiProviderModule } from './user-ai-provider.module';
 import { AiUserConfigController } from './ai-user-config.controller';
+import { AiCapabilitiesController } from './ai-capabilities.controller';
 import { AiModelGatewayModule } from '../ai-model-gateway/ai-model-gateway.module';
 
 /**
