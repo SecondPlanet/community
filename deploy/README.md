@@ -51,3 +51,8 @@ The public URL of an object is signed with the bucket name, and `nginx.conf`
 routes the bucket path to the storage server. If you rename `MINIO_BUCKET` or
 `MINIO_PRIVATE_BUCKET` in `.env`, update the two `location` blocks in
 `nginx.conf` as well.
+
+## 端口暴露提示
+
+`docker-compose.yml` 默认把 MySQL (3306) 和对象存储 (9000/9001) 映射到宿主机，便于本地调试。
+生产部署时建议删除这些 `ports:` 映射（容器网络内互访即可），或用防火墙限制来源。

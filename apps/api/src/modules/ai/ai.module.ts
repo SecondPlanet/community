@@ -11,7 +11,7 @@ import { AiModelGatewayModule } from '../ai-model-gateway/ai-model-gateway.modul
  */
 @Module({
   imports: [UserAiProviderModule, AiModelGatewayModule],
-  controllers: [AiController, AiUserConfigController],
+  controllers: [AiController, AiUserConfigController, AiCapabilitiesController],
   providers: [AiService],
   exports: [AiService],
 })
